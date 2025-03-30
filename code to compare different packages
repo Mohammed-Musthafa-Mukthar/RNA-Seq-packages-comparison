@@ -1,0 +1,126 @@
+RNA-Seq comapriosn
+# Load libraries
+library(DESeq2)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(cowplot)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(EnhancedVolcano)
+library(ggfortify)
+library(VennDiagram)
+
+# Load gene count matrix and metadata
+gene_counts <- read.csv("C:/Users/MuktharM/OneDrive - AGR-AGR/Documents/gene_count_data.csv", row.names=1)  
+metadata <- read.csv("C:/Users/MuktharM/OneDrive - AGR-AGR/Documents/col_data.csv", row.names=1)  
+
+# matching sample names between gene counts and metadata
+if (!all(colnames(gene_counts) == rownames(metadata))) {
+  stop("Mismatch between sample names in gene count matrix and metadata")
+}
+
+# DESeq2 Analysis
+dds <- DESeqDataSetFromMatrix(countData = gene_counts, colData = metadata, design = ~ CAD)
+dds <- DESeq(dds)
+res_deseq2 <- results(dds, alpha = 0.05)  # Adjusted p-value threshold
+res_deseq2 <- as.data.frame(res_deseq2)
+res_deseq2$Gene <- rownames(res_deseq2)
+
+# limma-voom Analysis
+dge <- DGEList(counts = gene_counts)
+dge <- calcNormFactors(dge)
+v <- voom(dge, design = model.matrix(~ CAD, data = metadata))
+fit <- lmFit(v, design = model.matrix(~ CAD, data = metadata))
+fit <- eBayes(fit)
+res_limma <- topTable(fit, coef=2, number=Inf, adjust.method="fdr")
+res_limma$Gene <- rownames(res_limma)
+
+# edgeR Analysis
+dge_edgeR <- DGEList(counts = gene_counts)
+dge_edgeR <- calcNormFactors(dge_edgeR)
+design <- model.matrix(~ CAD, data = metadata)
+dge_edgeR <- estimateDisp(dge_edgeR, design)
+fit_edgeR <- glmQLFit(dge_edgeR, design)
+res_edger <- glmQLFTest(fit_edgeR)
+res_edger <- as.data.frame(topTags(res_edger, n=Inf))
+res_edger$Gene <- rownames(res_edger)
+
+# Display top results for each method
+head(res_deseq2[order(res_deseq2$padj), ])  # Top genes from DESeq2  
+head(res_limma[order(res_limma$P.Value), ])  # Top genes from limma  
+head(res_edger[order(res_edger$FDR), ])      # Top genes from edgeR
+
+# Volcano Plot for DESeq2 using EnhancedVolcano
+volcano_plot <- EnhancedVolcano(res_deseq2, lab = res_deseq2$Gene,
+                                x = 'log2FoldChange', y = 'pvalue',
+                                pCutoff = 0.05, FCcutoff = 1.5,
+                                title = "Volcano Plot - DESeq2",
+                                colAlpha = 0.6, pointSize = 2.5)
+
+# Save Volcano Plot
+ggsave("C:/Users/MuktharM/OneDrive - AGR-AGR/Desktop/data analysis.svg", 
+       plot = volcano_plot, device = "svg", width = 8, height = 6)
+
+# Heatmap of Top 50 Differentially Expressed Genes
+top_genes <- unique(c(
+  rownames(res_deseq2[order(res_deseq2$padj),])[1:50],
+  rownames(res_limma[order(res_limma$P.Value),])[1:50],
+  rownames(res_edger[order(res_edger$FDR),])[1:50]
+))
+
+gene_counts_top <- gene_counts[top_genes, ]
+gene_counts_top <- t(scale(t(gene_counts_top)))  # Normalize across genes
+
+Heatmap(gene_counts_top, name = "Expression",
+        column_split = metadata$CAD, row_km = 3,
+        col = colorRampPalette(rev(brewer.pal(9, "RdBu")))(100))
+
+# Principal Component Analysis (PCA) for Sample Clustering
+gene_counts_filtered <- gene_counts[apply(gene_counts, 1, var) > 0, ]
+gene_counts_log <- log2(gene_counts_filtered + 1)  # Add 1 to avoid log(0)
+pca <- prcomp(t(gene_counts_log), scale. = TRUE)
+
+# Prepare PCA data for plotting
+pca_data <- data.frame(Sample = rownames(metadata),
+                       PC1 = pca$x[,1], PC2 = pca$x[,2],
+                       Group = metadata$CAD)
+
+# PCA Plot with Convex Hull for Group Separation
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  stat_ellipse(geom = "polygon", alpha = 0.2, aes(fill = Group), linetype = 0) +
+  scale_color_manual(values = c("#E41A1C", "#377EB8")) +
+  scale_fill_manual(values = c("#E41A1C", "#377EB8")) +
+  theme_minimal() +
+  labs(title = "PCA Analysis of Gene Expression", x = "PC1", y = "PC2")
+
+# Get significant genes from each method
+deseq_genes <- rownames(res_deseq2[res_deseq2$padj < 0.05 & !is.na(res_deseq2$padj), ])
+limma_genes <- rownames(res_limma[res_limma$adj.P.Val < 0.05, ])
+edger_genes <- rownames(res_edger[res_edger$FDR < 0.05, ])
+
+# Generate the Venn diagram for shared significant genes
+venn.plot <- venn.diagram(
+  x = list(DESeq2 = deseq_genes, limma = limma_genes, edgeR = edger_genes),
+  category.names = c("DESeq2", "limma", "edgeR"),
+  filename = NULL,  # Don't save the diagram here, we'll plot it first
+  col = "black",  # Border color for the circles
+  fill = c("red", "green", "blue"),  # Fill colors for the circles
+  alpha = 0.5,  # Transparency level
+  cex = 1.5,  # Label size for the intersection numbers
+  fontface = "bold",  # Make font bold
+  fontfamily = "serif",  # Font type
+  cat.cex = 1.5,  # Label size for category names
+  cat.fontface = "bold",  # Make category labels bold
+  cat.fontfamily = "serif"  # Font for category names
+)
+
+# Plot the Venn diagram
+grid.draw(venn.plot)
+
+# Save the Venn diagram
+ggsave("C:/Users/MuktharM/OneDrive - AGR-AGR/Documents/venn_plot.svg", 
+       plot = venn.plot, device = "svg", width = 8, height = 6)
